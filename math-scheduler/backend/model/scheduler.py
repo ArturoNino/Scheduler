@@ -10,7 +10,7 @@ from pyomo.opt import SolverStatus, TerminationCondition
 
 
 DIAS  = ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes"]
-HORAS = ["7-9", "9-11", "11-13", "14-16", "16-18"]
+HORAS = ["7-9", "9-11", "11-13", "14-16", "16-18","18-20"]
 
 
 @dataclass
@@ -72,10 +72,13 @@ class SchedulerModel:
 
         for _, row in self.df.iterrows():
             m  = row["nombre_materia"]
-            ns = int(row["numero_sesiones"])
-            nc = int(row["Cantidad_sesiones_computo"])
+            # CORRECCION: ng se estaba usando sin haber sido definida antes.
+            # Se calcula aqui primero y se reutiliza abajo.
+            ng = int(row["No_grupos"])
+            ns = int(row["numero_sesiones"]) // ng
+            nc = int(row["Cantidad_sesiones_computo"]) // ng
 
-            self.grupos_por_materia[m] = list(range(int(row["No_grupos"])))
+            self.grupos_por_materia[m] = list(range(ng))
             self.sesiones_materia[m]   = ns
             self.sesiones_computo_m[m] = nc
             self.sesiones_teorico_m[m] = ns - nc
@@ -92,7 +95,6 @@ class SchedulerModel:
                else ["Martes", "Jueves"]
             for m in self.materias
         }
-
     # ------------------------------------------------------------------
     # Validacion
     # ------------------------------------------------------------------
