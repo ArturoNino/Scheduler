@@ -43,6 +43,17 @@ class SchedulerModel:
         DisponibilidadSalon("Viernes",   2, 1),
     ]
 
+    # Franja restringida: solo estas materias pueden programarse ahi (HC10 del notebook)
+    FRANJA_RESTRINGIDA = "18-20"
+    MATERIAS_PERMITIDAS_18_20 = [
+        "CIBERSEGURIDAD",
+        "DISCIPLINA  4 - DEFI  4",
+        "DISCIPLINA  4 - MARKETING 4",
+        "DISCIPLINA 4 - AGROTECH 4",
+        "TALLER DE HABILIDADES GERENCIALES",
+        "TALLER DE HABILIDADES PROFESIONALES",
+    ]
+
     def __init__(
         self,
         df_proyecciones: pd.DataFrame,
@@ -90,10 +101,26 @@ class SchedulerModel:
         self.MG      = [(m, g) for m in self.materias for g in self.grupos_por_materia[m]]
         self.MG_teo  = [(m, g) for (m, g) in self.MG if self.sesiones_teorico_m[m] > 0]
         self.MG_comp = [(m, g) for (m, g) in self.MG if self.sesiones_computo_m[m] > 0]
+        # Patron de dias segun sesiones/semana:
+        #   3 sesiones -> Lunes, Miercoles, Viernes
+        #   2 sesiones -> Martes, Jueves
+        #   1 sesion   -> Martes, Jueves TAMBIEN, EXCEPTO si la materia esta
+        #                 en MATERIAS_PERMITIDAS_18_20 (esas si pueden ir
+        #                 cualquier dia de la semana)
+        #   otro caso  -> cualquier dia (4+ sesiones, sin patron definido)
+        def _dias_permitidos(m: str, ns: int) -> list:
+            if ns == 3:
+                return ["Lunes", "Miercoles", "Viernes"]
+            if ns == 2:
+                return ["Martes", "Jueves"]
+            if ns == 1:
+                if m in self.MATERIAS_PERMITIDAS_18_20:
+                    return DIAS
+                return ["Martes", "Jueves"]
+            return DIAS
+
         self.dias_permitidos = {
-            m: ["Lunes", "Miercoles", "Viernes"] if self.sesiones_materia[m] == 3
-               else ["Martes", "Jueves"]
-            for m in self.materias
+            m: _dias_permitidos(m, self.sesiones_materia[m]) for m in self.materias
         }
     # ------------------------------------------------------------------
     # Validacion
@@ -204,24 +231,52 @@ class SchedulerModel:
             return Constraint.Skip
         model.solo_comp = Constraint(model.MG, model.D, model.T, rule=solo_comp_rule)
 
-        # 10-11. Franja horaria fija - desactivadas: generan infeasibility en datos actuales
+        # 10. Franja 18-20 restringida a materias especificas
+        def franja_18_20_rule(mdl, m, g, d):
+            if m not in ctx.MATERIAS_PERMITIDAS_18_20:
+                return (
+                    mdl.x_t[(m, g), d, ctx.FRANJA_RESTRINGIDA]
+                    + mdl.x_c[(m, g), d, ctx.FRANJA_RESTRINGIDA]
+                ) == 0
+            return Constraint.Skip
+        model.franja_18_20 = Constraint(model.MG, model.D, rule=franja_18_20_rule)
+
+        # 11. Cada grupo elige exactamente una franja fija (solo si sesiones_materia > 1)
         def una_franja_rule(mdl, m, g):
             if ctx.sesiones_materia[m] > 1:
                 return sum(mdl.z[(m, g), t] for t in mdl.T) == 1
             return Constraint.Skip
         model.una_franja = Constraint(model.MG, rule=una_franja_rule)
 
+        # 12. Todas las sesiones de un grupo van en su franja fija (con holgura).
+        # CORRECCION: antes era una igualdad ("=="), que exigia el 100% de las
+        # sesiones exactas en la franja elegida y, si los salones no
+        # alcanzaban, no habia ningun z factible -> el modelo completo se
+        # volvia infeasible (por eso estaba desactivada). Con "<=" el modelo
+        # puede asignar menos sesiones en la franja elegida y dejar el resto
+        # como holgura_teo/holgura_comp (restricciones 1-2), en vez de
+        # tumbar todo el problema. Por eso ya se puede dejar ACTIVA.
         def franja_fija_rule(mdl, m, g, t):
             if ctx.sesiones_materia[m] > 1:
                 return (
                     sum(mdl.x_t[(m, g), d, t] for d in ctx.dias_permitidos[m])
                     + sum(mdl.x_c[(m, g), d, t] for d in ctx.dias_permitidos[m])
-                ) == ctx.sesiones_materia[m] * mdl.z[(m, g), t]
+                ) <= ctx.sesiones_materia[m] * mdl.z[(m, g), t]
             return Constraint.Skip
         model.franja_fija = Constraint(model.MG, model.T, rule=franja_fija_rule)
 
-        model.una_franja.deactivate()
-        model.franja_fija.deactivate()
+        # 13. En la franja 18-20 solo puede haber UNA materia por dia (entre
+        # todas las materias de MATERIAS_PERMITIDAS_18_20, sin importar
+        # cuantas sesiones/semana tenga cada una ni cuantos grupos).
+        def una_materia_18_20_rule(mdl, d):
+            grupos_18_20 = [(m, g) for (m, g) in ctx.MG if m in ctx.MATERIAS_PERMITIDAS_18_20]
+            if not grupos_18_20:
+                return Constraint.Skip
+            return sum(
+                mdl.x_t[(m, g), d, ctx.FRANJA_RESTRINGIDA] + mdl.x_c[(m, g), d, ctx.FRANJA_RESTRINGIDA]
+                for (m, g) in grupos_18_20
+            ) <= 1
+        model.una_materia_18_20 = Constraint(model.D, rule=una_materia_18_20_rule)
 
         # Objetivo: maximizar sesiones asignadas - penalizacion por holgura
         model.obj = Objective(
