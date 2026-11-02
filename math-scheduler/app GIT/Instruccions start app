@@ -1,0 +1,12 @@
+Instruccions start app
+
+backend: 
+
+cd Documents/8TOSEMESTRE/TESIS/app/backend
+uvicorn app.main:app --reload --port 8000
+
+frontend:
+
+cd Documents/8TOSEMESTRE/TESIS/app/frontend
+npm install
+npm run dev -- --host
